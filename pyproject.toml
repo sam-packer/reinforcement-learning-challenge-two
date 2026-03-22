@@ -16,6 +16,13 @@ dependencies = [
 [project.scripts]
 train = "train_cli:main"
 
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["train_cli"]
+
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu130" }]
 
