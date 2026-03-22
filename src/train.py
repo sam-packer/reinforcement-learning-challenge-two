@@ -72,7 +72,9 @@ def print_runtime_info(precision: PrecisionConfig):
 
 def load_training_data(config: TrainConfig):
     print(f"Loading preference data from {config.data_path}")
-    sft_dataset, _, _, _, metadata = load_preference_data(config.data_path, seed=config.seed)
+    sft_dataset, _, _, _, metadata = load_preference_data(
+        config.data_path, seed=config.seed
+    )
     print(f"Source CSVs: {metadata['num_source_files']}")
     print(f"SFT dataset: {len(sft_dataset)} examples")
     print(f"Categories: {metadata['categories']}")
@@ -81,6 +83,7 @@ def load_training_data(config: TrainConfig):
 
 def apply_chat_template_to_dataset(train_dataset, tokenizer):
     """Format prompts so instruction-tuned models see a proper chat prefix."""
+
     def format_example(example):
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -100,7 +103,9 @@ def load_tokenizer(model_name: str):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         if tokenizer.eos_token is None:
-            raise ValueError("Tokenizer must define either a pad token or an eos token.")
+            raise ValueError(
+                "Tokenizer must define either a pad token or an eos token."
+            )
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
     return tokenizer
@@ -110,7 +115,7 @@ def load_model(config: TrainConfig, tokenizer, precision: PrecisionConfig):
     print(f"\nLoading base model: {config.base_model}")
     model = AutoModelForCausalLM.from_pretrained(
         config.base_model,
-        torch_dtype=precision.model_dtype,
+        dtype=precision.model_dtype,
     )
     model.config.pad_token_id = tokenizer.pad_token_id
     if model.generation_config is not None:
@@ -153,7 +158,8 @@ def estimate_warmup_steps(config: TrainConfig, train_dataset_size: int) -> int:
         total_steps = config.max_steps
     else:
         total_steps = max(
-            math.ceil(train_dataset_size / config.effective_batch_size) * config.num_epochs,
+            math.ceil(train_dataset_size / config.effective_batch_size)
+            * config.num_epochs,
             1,
         )
     return max(int(total_steps * config.warmup_fraction), 0)

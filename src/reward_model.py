@@ -70,7 +70,9 @@ def load_tokenizer(model_name: str):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         if tokenizer.eos_token is None:
-            raise ValueError("Tokenizer must define either a pad token or an eos token.")
+            raise ValueError(
+                "Tokenizer must define either a pad token or an eos token."
+            )
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
     return tokenizer
@@ -98,18 +100,21 @@ def load_model(config: RewardModelTrainConfig, tokenizer, precision: PrecisionCo
     model = AutoModelForSequenceClassification.from_pretrained(
         config.base_model,
         num_labels=1,
-        torch_dtype=precision.model_dtype,
+        dtype=precision.model_dtype,
     )
     model.config.pad_token_id = tokenizer.pad_token_id
     return model
 
 
-def estimate_warmup_steps(config: RewardModelTrainConfig, train_dataset_size: int) -> int:
+def estimate_warmup_steps(
+    config: RewardModelTrainConfig, train_dataset_size: int
+) -> int:
     if config.max_steps > 0:
         total_steps = config.max_steps
     else:
         total_steps = max(
-            math.ceil(train_dataset_size / config.effective_batch_size) * config.num_epochs,
+            math.ceil(train_dataset_size / config.effective_batch_size)
+            * config.num_epochs,
             1,
         )
     return max(int(total_steps * config.warmup_fraction), 0)
