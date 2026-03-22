@@ -1,0 +1,25 @@
+[project]
+name = "rl-challenge2"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "datasets>=4.8.3",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "peft>=0.18.1",
+    "scikit-learn>=1.8.0",
+    "torch>=2.10.0",
+    "trl>=0.29.1",
+]
+
+[project.scripts]
+train = "train_cli:main"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
