@@ -12,7 +12,8 @@ from pathlib import Path
 import torch
 from peft import LoraConfig, TaskType
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
-from trl import RewardConfig, RewardTrainer
+from trl.trainer.reward_config import RewardConfig
+from trl.trainer.reward_trainer import RewardTrainer
 
 from load_data import load_preference_data
 
@@ -26,7 +27,7 @@ class RewardModelTrainConfig:
     num_epochs: int = 1
     max_steps: int = -1
     batch_size: int = 1
-    eval_batch_size: int = 1
+    eval_batch_size: int = 4
     gradient_accumulation_steps: int = 8
     learning_rate: float = 1e-4
     max_length: int = 1024
@@ -59,11 +60,11 @@ def select_precision() -> PrecisionConfig:
 
 
 def load_reward_data(config: RewardModelTrainConfig):
-    _, reward_train, reward_val, _, metadata = load_preference_data(
+    datasets, metadata = load_preference_data(
         config.data_path,
         seed=config.seed,
     )
-    return reward_train, reward_val, metadata
+    return datasets["reward_train"], datasets["reward_val"], metadata
 
 
 def load_tokenizer(model_name: str):
@@ -139,6 +140,7 @@ def build_training_args(
     config: RewardModelTrainConfig,
     precision: PrecisionConfig,
     train_dataset_size: int,
+    has_eval_dataset: bool,
 ) -> RewardConfig:
     warmup_steps = estimate_warmup_steps(config, train_dataset_size)
     return RewardConfig(
@@ -154,7 +156,7 @@ def build_training_args(
         logging_steps=config.logging_steps,
         save_strategy="epoch",
         save_total_limit=2,
-        eval_strategy="epoch",
+        eval_strategy="epoch" if has_eval_dataset else "no",
         lr_scheduler_type="cosine",
         bf16=precision.bf16,
         fp16=precision.fp16,
@@ -165,9 +167,71 @@ def build_training_args(
     )
 
 
+def batch_reward_scores(
+    model, tokenizer, texts: list[str], max_length: int
+) -> torch.Tensor:
+    model_device = next(model.parameters()).device
+    batch = tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt",
+    )
+    batch = {key: value.to(model_device) for key, value in batch.items()}
+    with torch.inference_mode():
+        logits = model(**batch).logits.squeeze(-1)
+    return logits.detach().float().cpu()
+
+
+def evaluate_pairwise_accuracy(
+    model,
+    tokenizer,
+    eval_dataset,
+    config: RewardModelTrainConfig,
+) -> dict[str, float] | None:
+    if len(eval_dataset) == 0:
+        return None
+
+    chosen_scores = []
+    rejected_scores = []
+    model.eval()
+    for start in range(0, len(eval_dataset), config.eval_batch_size):
+        stop = min(start + config.eval_batch_size, len(eval_dataset))
+        batch = eval_dataset[start:stop]
+        chosen_texts = [
+            prompt + chosen
+            for prompt, chosen in zip(batch["prompt"], batch["chosen"], strict=False)
+        ]
+        rejected_texts = [
+            prompt + rejected
+            for prompt, rejected in zip(
+                batch["prompt"], batch["rejected"], strict=False
+            )
+        ]
+        chosen_scores.append(
+            batch_reward_scores(model, tokenizer, chosen_texts, config.max_length)
+        )
+        rejected_scores.append(
+            batch_reward_scores(model, tokenizer, rejected_texts, config.max_length)
+        )
+
+    chosen_scores_tensor = torch.cat(chosen_scores)
+    rejected_scores_tensor = torch.cat(rejected_scores)
+    margins = chosen_scores_tensor - rejected_scores_tensor
+
+    return {
+        "pairwise_accuracy": (margins > 0).float().mean().item(),
+        "mean_margin": margins.mean().item(),
+        "mean_chosen_score": chosen_scores_tensor.mean().item(),
+        "mean_rejected_score": rejected_scores_tensor.mean().item(),
+    }
+
+
 def save_metrics(
     train_result,
-    eval_metrics: dict[str, float] | None,
+    eval_loss_metrics: dict[str, float] | None,
+    pairwise_metrics: dict[str, float] | None,
     config: RewardModelTrainConfig,
     reward_train_size: int,
     reward_val_size: int,
@@ -186,8 +250,10 @@ def save_metrics(
         "learning_rate": config.learning_rate,
         "usable_pairs": metadata["usable_pairs"],
     }
-    if eval_metrics is not None:
-        metrics["eval"] = eval_metrics
+    if eval_loss_metrics is not None:
+        metrics["eval_loss"] = {"loss": eval_loss_metrics["eval_loss"]}
+    if pairwise_metrics is not None:
+        metrics["eval_ranking"] = pairwise_metrics
 
     config.log_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = config.log_dir / "reward_metrics.json"
@@ -205,7 +271,12 @@ def train_reward_model(config: RewardModelTrainConfig | None = None):
     reward_val = apply_chat_template_to_reward_dataset(reward_val, tokenizer)
     model = load_model(config, tokenizer, precision)
     peft_config = build_peft_config(config)
-    training_args = build_training_args(config, precision, len(reward_train))
+    training_args = build_training_args(
+        config,
+        precision,
+        len(reward_train),
+        has_eval_dataset=len(reward_val) > 0,
+    )
 
     trainer = RewardTrainer(
         model=model,
@@ -224,7 +295,13 @@ def train_reward_model(config: RewardModelTrainConfig | None = None):
     print()
 
     train_result = trainer.train()
-    eval_metrics = trainer.evaluate() if len(reward_val) > 0 else None
+    eval_loss_metrics = trainer.evaluate() if len(reward_val) > 0 else None
+    pairwise_metrics = evaluate_pairwise_accuracy(
+        model=trainer.model,
+        tokenizer=tokenizer,
+        eval_dataset=reward_val,
+        config=config,
+    )
 
     trainer.save_model(str(config.output_dir))
     tokenizer.save_pretrained(str(config.output_dir))
@@ -232,7 +309,8 @@ def train_reward_model(config: RewardModelTrainConfig | None = None):
 
     save_metrics(
         train_result=train_result,
-        eval_metrics=eval_metrics,
+        eval_loss_metrics=eval_loss_metrics,
+        pairwise_metrics=pairwise_metrics,
         config=config,
         reward_train_size=len(reward_train),
         reward_val_size=len(reward_val),
@@ -243,5 +321,6 @@ def train_reward_model(config: RewardModelTrainConfig | None = None):
         "output_dir": config.output_dir,
         "train_size": len(reward_train),
         "val_size": len(reward_val),
-        "eval_metrics": eval_metrics,
+        "eval_loss_metrics": eval_loss_metrics,
+        "pairwise_metrics": pairwise_metrics,
     }

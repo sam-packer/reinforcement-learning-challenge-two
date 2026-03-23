@@ -1,5 +1,5 @@
 """
-Minimal supervised fine-tuning pipeline for preference data.
+Minimal RLHF training pipeline: SFT -> reward model -> PPO.
 """
 
 from __future__ import annotations
@@ -12,9 +12,11 @@ from pathlib import Path
 import torch
 from peft import LoraConfig, TaskType
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import SFTConfig, SFTTrainer
+from trl.trainer.sft_config import SFTConfig
+from trl.trainer.sft_trainer import SFTTrainer
 
 from load_data import load_preference_data
+from ppo import PPOTrainConfig, train_ppo
 from reward_model import RewardModelTrainConfig, train_reward_model
 
 
@@ -37,7 +39,7 @@ class TrainConfig:
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
-    sanity_check_tokens: int = 200
+    sanity_check_tokens: int = 160
 
     @property
     def effective_batch_size(self) -> int:
@@ -72,16 +74,15 @@ def print_runtime_info(precision: PrecisionConfig):
 
 def load_training_data(config: TrainConfig):
     print(f"Loading preference data from {config.data_path}")
-    sft_dataset, _, _, _, metadata = load_preference_data(
-        config.data_path, seed=config.seed
-    )
+    datasets, metadata = load_preference_data(config.data_path, seed=config.seed)
     print(f"Source CSVs: {metadata['num_source_files']}")
-    print(f"SFT dataset: {len(sft_dataset)} examples")
+    print(f"Train pairs: {metadata['train_pairs']}")
+    print(f"Val pairs: {metadata['val_pairs']}")
     print(f"Categories: {metadata['categories']}")
-    return sft_dataset, metadata
+    return datasets["sft_train"], datasets["sft_val"], metadata
 
 
-def apply_chat_template_to_dataset(train_dataset, tokenizer):
+def apply_chat_template_to_dataset(dataset, tokenizer):
     """Format prompts so instruction-tuned models see a proper chat prefix."""
 
     def format_example(example):
@@ -96,7 +97,7 @@ def apply_chat_template_to_dataset(train_dataset, tokenizer):
         )
         return {"prompt": formatted_prompt}
 
-    return train_dataset.map(format_example)
+    return dataset.map(format_example)
 
 
 def load_tokenizer(model_name: str):
@@ -128,6 +129,7 @@ def build_training_args(
     config: TrainConfig,
     precision: PrecisionConfig,
     train_dataset_size: int,
+    has_eval_dataset: bool,
 ) -> SFTConfig:
     warmup_steps = estimate_warmup_steps(config, train_dataset_size)
     return SFTConfig(
@@ -142,6 +144,7 @@ def build_training_args(
         logging_steps=config.logging_steps,
         save_strategy="epoch",
         save_total_limit=2,
+        eval_strategy="epoch" if has_eval_dataset else "no",
         lr_scheduler_type="cosine",
         bf16=precision.bf16,
         fp16=precision.fp16,
@@ -186,21 +189,30 @@ def build_trainer(
     model,
     tokenizer,
     train_dataset,
+    eval_dataset,
     config: TrainConfig,
     precision: PrecisionConfig,
     peft_config: LoraConfig | None,
 ) -> SFTTrainer:
-    training_args = build_training_args(config, precision, len(train_dataset))
+    training_args = build_training_args(
+        config,
+        precision,
+        len(train_dataset),
+        has_eval_dataset=len(eval_dataset) > 0,
+    )
     return SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
+        eval_dataset=eval_dataset if len(eval_dataset) > 0 else None,
         processing_class=tokenizer,
         peft_config=peft_config,
     )
 
 
-def print_training_summary(config: TrainConfig, train_dataset_size: int):
+def print_training_summary(
+    config: TrainConfig, train_dataset_size: int, eval_dataset_size: int
+):
     print("\nStarting SFT training...")
     print(f"  Epochs:           {config.num_epochs}")
     if config.max_steps > 0:
@@ -211,21 +223,37 @@ def print_training_summary(config: TrainConfig, train_dataset_size: int):
     )
     print(f"  Learning rate:    {config.learning_rate}")
     print(f"  Max length:       {config.max_length}")
-    print(f"  Training samples: {train_dataset_size}")
+    print(f"  Train samples:    {train_dataset_size}")
+    print(f"  Val samples:      {eval_dataset_size}")
     print()
+
+
+def build_eval_metrics(
+    eval_metrics: dict[str, float] | None,
+) -> dict[str, float] | None:
+    if eval_metrics is None:
+        return None
+    eval_loss = eval_metrics["eval_loss"]
+    return {
+        "loss": eval_loss,
+        "perplexity": math.exp(min(eval_loss, 20.0)),
+    }
 
 
 def save_metrics(
     result,
+    eval_metrics: dict[str, float] | None,
     config: TrainConfig,
     train_dataset_size: int,
+    eval_dataset_size: int,
     metadata: dict,
 ):
     metrics = {
         "train_loss": result.training_loss,
         "train_runtime_s": result.metrics["train_runtime"],
         "train_samples_per_second": result.metrics["train_samples_per_second"],
-        "num_examples": train_dataset_size,
+        "sft_train_examples": train_dataset_size,
+        "sft_val_examples": eval_dataset_size,
         "num_epochs": config.num_epochs,
         "max_steps": config.max_steps,
         "base_model": config.base_model,
@@ -233,6 +261,10 @@ def save_metrics(
         "learning_rate": config.learning_rate,
         "usable_pairs": metadata["usable_pairs"],
     }
+    sft_eval = build_eval_metrics(eval_metrics)
+    if sft_eval is not None:
+        metrics["eval"] = sft_eval
+
     config.log_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = config.log_dir / "sft_metrics.json"
     with metrics_path.open("w", encoding="utf-8") as file:
@@ -257,6 +289,7 @@ def run_sanity_check(model, tokenizer, prompt: str, max_new_tokens: int):
             max_new_tokens=max_new_tokens,
             temperature=0.7,
             do_sample=True,
+            top_p=0.95,
             pad_token_id=tokenizer.pad_token_id,
         )
 
@@ -273,29 +306,43 @@ def train_sft(config: TrainConfig | None = None):
     config = config or DEFAULT_CONFIG
     precision = select_precision()
     print_runtime_info(precision)
-    train_dataset, metadata = load_training_data(config)
+    train_dataset, eval_dataset, metadata = load_training_data(config)
     tokenizer = load_tokenizer(config.base_model)
-    sample_prompt = train_dataset[0]["prompt"]
+    sample_prompt = (
+        eval_dataset[0]["prompt"]
+        if len(eval_dataset) > 0
+        else train_dataset[0]["prompt"]
+    )
     train_dataset = apply_chat_template_to_dataset(train_dataset, tokenizer)
+    eval_dataset = apply_chat_template_to_dataset(eval_dataset, tokenizer)
     model = load_model(config, tokenizer, precision)
     peft_config = build_peft_config(config)
     trainer = build_trainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         config=config,
         precision=precision,
         peft_config=peft_config,
     )
 
-    print_training_summary(config, len(train_dataset))
+    print_training_summary(config, len(train_dataset), len(eval_dataset))
     result = trainer.train()
+    eval_metrics = trainer.evaluate() if len(eval_dataset) > 0 else None
 
     trainer.save_model(str(config.output_dir))
     tokenizer.save_pretrained(str(config.output_dir))
     print(f"\nModel saved to {config.output_dir}")
 
-    save_metrics(result, config, len(train_dataset), metadata)
+    save_metrics(
+        result=result,
+        eval_metrics=eval_metrics,
+        config=config,
+        train_dataset_size=len(train_dataset),
+        eval_dataset_size=len(eval_dataset),
+        metadata=metadata,
+    )
     run_sanity_check(
         model=trainer.model,
         tokenizer=tokenizer,
@@ -312,7 +359,8 @@ def train_sft(config: TrainConfig | None = None):
 
     return {
         "output_dir": config.output_dir,
-        "num_examples": len(train_dataset),
+        "train_examples": len(train_dataset),
+        "val_examples": len(eval_dataset),
     }
 
 
@@ -322,9 +370,15 @@ def main():
         data_path=sft_config.data_path,
         base_model=sft_config.base_model,
     )
+    ppo_config = PPOTrainConfig(
+        data_path=sft_config.data_path,
+        policy_path=sft_config.output_dir,
+        reward_model_path=reward_config.output_dir,
+    )
 
     train_sft(sft_config)
     train_reward_model(reward_config)
+    train_ppo(ppo_config)
 
 
 if __name__ == "__main__":

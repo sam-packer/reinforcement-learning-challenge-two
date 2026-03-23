@@ -1,38 +1,83 @@
 # RL Challenge 2
 
-Minimal toy RLHF pipeline for an assignment.
+RLHF training pipeline built around three stages:
 
-The project currently does two steps:
+1. supervised fine-tuning on preferred responses
+2. reward-model training on chosen vs. rejected pairs
+3. PPO alignment against the learned reward model
 
-1. Supervised fine-tuning (SFT) on the preferred responses from the dataset
-2. Reward-model training on chosen vs. rejected response pairs
+The repo keeps the pipeline small and direct: a shared data loader, one top-level training entrypoint, one reward-model module, and one PPO module.
+
+## Pipeline
+
+`preference CSV -> filtering -> shared train/validation split -> SFT -> reward model -> PPO`
+
+Each stage has a separate role:
+
+- SFT trains the assistant to imitate preferred completions
+- the reward model learns to rank preferred responses above rejected ones
+- PPO updates the assistant policy using reward-model scores while penalizing drift from the SFT reference policy
 
 ## Project Structure
 
-- `src/load_data.py`: loads and filters preference data
-- `src/train.py`: runs the SFT step, then the reward-model step
-- `src/reward_model.py`: trains the reward model
-- `data/`: local preference CSVs
-- `checkpoints/`: saved model outputs
-- `logs/`: saved training metrics
+- `src/load_data.py`: loads preference CSVs, filters noisy rows, and builds SFT, reward-model, and PPO datasets
+- `src/train.py`: runs the full training pipeline end to end
+- `src/reward_model.py`: reward-model training and evaluation
+- `src/ppo.py`: PPO rollout, reward scoring, and policy optimization
+- `docs/rlhf_learning_guide.md`: detailed explanation of the pipeline, metrics, and design decisions
 
 ## Requirements
 
 - Python 3.13
 - `uv`
-- CUDA
+- CUDA recommended
 
 ## Run
-
-Install dependencies with `uv`, then run:
 
 ```bash
 uv run train
 ```
 
-## Outputs
+## Checkpoints And Logs
 
-- SFT model: `checkpoints/sft`
-- Reward model: `checkpoints/reward_model`
+- SFT checkpoint: `checkpoints/sft`
+- reward-model checkpoint: `checkpoints/reward_model`
+- PPO checkpoint: `checkpoints/ppo`
 - SFT metrics: `logs/sft/sft_metrics.json`
-- Reward metrics: `logs/reward_model/reward_metrics.json`
+- reward-model metrics: `logs/reward_model/reward_metrics.json`
+- PPO metrics: `logs/ppo/ppo_metrics.json`
+
+## Metrics
+
+### SFT
+
+- training loss
+- validation loss
+- validation perplexity
+
+### Reward Model
+
+- training loss
+- validation loss
+- pairwise accuracy on held-out comparisons
+- mean chosen-minus-rejected score margin
+
+### PPO
+
+- mean reward-model score on PPO rollouts
+- mean KL from the PPO policy to the frozen SFT reference
+- mean total reward after KL penalty
+- mean PPO policy loss
+- mean clip fraction
+- held-out PPO win rate vs the frozen SFT policy
+
+## PPO Implementation Note
+
+- rollout generation and frozen-policy scoring use `torch.no_grad()`, not `torch.inference_mode()`
+- PPO reuses sampled rollout tensors in later gradient-tracked policy updates, and `inference_mode` tensors are too restrictive for that use
+
+## Inference Roles
+
+- `checkpoints/reward_model` is a scorer, not the chat model
+- `checkpoints/ppo` is the final aligned policy checkpoint for generation
+- `checkpoints/sft` is the pre-PPO reference policy and also a usable generation checkpoint
