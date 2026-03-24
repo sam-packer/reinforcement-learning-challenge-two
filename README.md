@@ -24,13 +24,22 @@ Each stage has a separate role:
 - `src/train.py`: runs the full training pipeline end to end
 - `src/reward_model.py`: reward-model training and evaluation
 - `src/ppo.py`: PPO rollout, reward scoring, and policy optimization
+- `src/learning_curve.py`: learning curve analysis — trains reward models at increasing data fractions to show how accuracy scales with dataset size
 - `docs/rlhf_learning_guide.md`: detailed explanation of the pipeline, metrics, and design decisions
 
 ## Requirements
 
 - Python 3.13
 - `uv`
-- CUDA recommended
+- NVIDIA GPU with CUDA
+
+## Setup
+
+Requires a CUDA GPU (Linux or Windows). Recommended to run on Google Colab or a machine with an NVIDIA GPU.
+
+```bash
+uv sync
+```
 
 ## Run
 
@@ -46,6 +55,7 @@ uv run train
 - SFT metrics: `logs/sft/sft_metrics.json`
 - reward-model metrics: `logs/reward_model/reward_metrics.json`
 - PPO metrics: `logs/ppo/ppo_metrics.json`
+- learning curve results: `logs/learning_curve/learning_curve.json`
 
 ## Metrics
 
@@ -70,6 +80,16 @@ uv run train
 - mean PPO policy loss
 - mean clip fraction
 - held-out PPO win rate vs the frozen SFT policy
+
+### Learning Curve
+
+Trains the reward model at 20%, 40%, 60%, 80%, and 100% of the training data against a fixed validation set. Reports:
+
+- overall pairwise accuracy at each fraction
+- per-category accuracy (e.g. factual vs empathy) to show which categories are data-starved
+- mean chosen-minus-rejected margin
+
+If accuracy is still climbing steeply at 100%, more data is needed. If it's flattening, you're near saturation.
 
 ## PPO Implementation Note
 

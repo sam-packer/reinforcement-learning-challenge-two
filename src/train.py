@@ -15,6 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl.trainer.sft_config import SFTConfig
 from trl.trainer.sft_trainer import SFTTrainer
 
+from learning_curve import run_learning_curve
 from load_data import load_preference_data
 from ppo import PPOTrainConfig, train_ppo
 from reward_model import RewardModelTrainConfig, train_reward_model
@@ -379,6 +380,11 @@ def main():
     train_sft(sft_config)
     train_reward_model(reward_config)
     train_ppo(ppo_config)
+    run_learning_curve(
+        data_path=sft_config.data_path,
+        base_model=sft_config.base_model,
+        seed=sft_config.seed,
+    )
 
 
 if __name__ == "__main__":
