@@ -35,8 +35,8 @@ class PPOTrainConfig:
     batch_size: int = 4
     learning_rate: float = 1e-5
     max_prompt_length: int = 512
-    max_response_length: int = 128
-    ppo_updates_per_batch: int = 2
+    max_response_length: int = 512
+    ppo_updates_per_batch: int = 4
     clip_range: float = 0.2
     kl_coefficient: float = 0.05
     max_grad_norm: float = 1.0
@@ -394,6 +394,9 @@ def evaluate_policy(
     if len(eval_dataset) == 0:
         return None
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     prompts = [eval_dataset[index]["prompt"] for index in range(len(eval_dataset))]
     model_device = next(policy_model.parameters()).device
     formatted_prompts = format_prompts(prompts, tokenizer)
@@ -408,7 +411,7 @@ def evaluate_policy(
     def generate_with_adapter(adapter_name: str) -> list[str]:
         policy_model.eval()
         policy_model.set_adapter(adapter_name)
-        with torch.inference_mode():
+        with torch.no_grad():
             outputs = policy_model.generate(
                 **prompt_batch,
                 max_new_tokens=config.max_response_length,

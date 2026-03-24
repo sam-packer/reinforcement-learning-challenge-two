@@ -23,13 +23,13 @@ from reward_model import RewardModelTrainConfig, train_reward_model
 @dataclass(frozen=True)
 class TrainConfig:
     data_path: str = "data"
-    base_model: str = "Qwen/Qwen2.5-7B-Instruct"
+    base_model: str = "Qwen/Qwen2.5-3B-Instruct"
     output_dir: Path = Path("checkpoints/sft")
     log_dir: Path = Path("logs/sft")
     num_epochs: int = 3
     max_steps: int = -1
-    batch_size: int = 1
-    gradient_accumulation_steps: int = 8
+    batch_size: int = 4
+    gradient_accumulation_steps: int = 4
     learning_rate: float = 2e-4
     max_length: int = 1024
     warmup_fraction: float = 0.1

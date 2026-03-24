@@ -21,14 +21,14 @@ from load_data import load_preference_data
 @dataclass(frozen=True)
 class RewardModelTrainConfig:
     data_path: str = "data"
-    base_model: str = "Qwen/Qwen2.5-7B-Instruct"
+    base_model: str = "Qwen/Qwen2.5-3B-Instruct"
     output_dir: Path = Path("checkpoints/reward_model")
     log_dir: Path = Path("logs/reward_model")
-    num_epochs: int = 1
+    num_epochs: int = 3
     max_steps: int = -1
-    batch_size: int = 1
-    eval_batch_size: int = 4
-    gradient_accumulation_steps: int = 8
+    batch_size: int = 4
+    eval_batch_size: int = 8
+    gradient_accumulation_steps: int = 4
     learning_rate: float = 1e-4
     max_length: int = 1024
     warmup_fraction: float = 0.1
