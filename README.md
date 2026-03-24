@@ -1,5 +1,7 @@
 # RL Challenge 2
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sam-packer/reinforcement-learning-challenge-two/blob/master/colab.ipynb)
+
 RLHF training pipeline built around three stages:
 
 1. supervised fine-tuning on preferred responses
